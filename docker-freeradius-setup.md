@@ -498,14 +498,59 @@ docker-compose logs freeradius
 
 ## Step 7: Test the Configuration
 
-### 7.1 Test from Inside the Container
+### 7.1 Test Basic RADIUS Functionality
+
+First, test that FreeRADIUS is running and responding:
 
 ```bash
+# Test basic PAP authentication (for server connectivity)
 docker exec -it freeradius-server bash
-radtest -t eap-tls -x testing123 127.0.0.1 0
+radtest testing testing123 127.0.0.1 0 testing123
 ```
 
-### 7.2 Test with Android Device
+### 7.2 Test EAP-TLS Configuration
+
+For EAP-TLS testing, you'll need to use a proper EAP-TLS client. Here are several options:
+
+#### Option A: Using eapol_test (Recommended)
+
+Install and use `eapol_test` for proper EAP-TLS testing:
+
+```bash
+# Install eapol_test on your host system
+sudo apt-get install wpa-supplicant
+
+# Create a test configuration file
+cat > eapol_test.conf << EOF
+network={
+    ssid="test-network"
+    key_mgmt=IEEE8021X
+    eap=TLS
+    ca_cert="/path/to/your/ca.crt"
+    client_cert="/path/to/your/client.crt"
+    private_key="/path/to/your/client.key"
+    private_key_passwd="your_password"
+    identity="test-user"
+}
+EOF
+
+# Test EAP-TLS authentication
+eapol_test -c eapol_test.conf -s your_radius_secret -a YOUR_RADIUS_SERVER_IP -p 1812
+```
+
+#### Option B: Using Windows Test Client
+
+1. Create a test wireless profile on Windows:
+   - Network name: Test-Network
+   - Security: WPA2 Enterprise
+   - EAP method: TLS
+   - CA certificate: Your Root CA
+   - Client certificate: A test client certificate
+   - Identity: test-user
+
+2. Try to connect to the network and check the authentication logs.
+
+#### Option C: Using Android Device (Real-world test)
 
 1. On your Android device, go to Settings > Wi-Fi
 2. Add a new network with the following settings:
@@ -515,6 +560,36 @@ radtest -t eap-tls -x testing123 127.0.0.1 0
    - CA certificate: Select your Intune-distributed Root CA
    - Client certificate: Select the SCEP certificate distributed by Intune
    - Identity: Leave blank or use a device identifier
+
+### 7.3 Verify FreeRADIUS Configuration
+
+Check that FreeRADIUS is properly configured:
+
+```bash
+# Test configuration syntax
+docker exec -it freeradius-server freeradius -C
+
+# Check if FreeRADIUS is listening on the correct ports
+docker exec -it freeradius-server netstat -tulpn | grep 1812
+
+# View real-time logs during authentication attempts
+docker exec -it freeradius-server tail -f /var/log/freeradius/radius.log
+```
+
+### 7.4 Test Certificate Validation
+
+Verify that your certificates are properly configured:
+
+```bash
+# Check certificate validity
+docker exec -it freeradius-server openssl x509 -in /etc/freeradius/3.0/certs/server.crt -text -noout
+
+# Verify certificate chain
+docker exec -it freeradius-server openssl verify -CAfile /etc/freeradius/3.0/certs/ca.crt /etc/freeradius/3.0/certs/server.crt
+
+# Test TLS handshake
+docker exec -it freeradius-server openssl s_client -connect localhost:1812 -cert /etc/freeradius/3.0/certs/server.crt -key /etc/freeradius/3.0/certs/server.key -CAfile /etc/freeradius/3.0/certs/ca.crt
+```
 
 ## Step 8: Configure Your Wireless Controller
 
