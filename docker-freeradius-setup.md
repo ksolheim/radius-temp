@@ -34,8 +34,8 @@ services:
       - "1813:1813/udp"  # RADIUS accounting
       - "18120:18120"    # FreeRADIUS status
     volumes:
-      - ./config:/etc/raddb
-      - ./certs:/etc/raddb/certs
+      - ./config:/etc/freeradius/3.0
+      - ./certs:/etc/freeradius/3.0/certs
       - ./logs:/var/log/freeradius
     environment:
       - RADIUS_SECRET=your_radius_secret_here
@@ -64,7 +64,7 @@ sysconfdir = /etc
 localstatedir = /var
 sbindir = ${exec_prefix}/sbin
 logdir = /var/log/freeradius
-raddbdir = /etc/raddb
+raddbdir = /etc/freeradius/3.0
 radacctdir = ${logdir}/radacct
 
 name = freeradius
@@ -140,7 +140,64 @@ $INCLUDE policy.conf
 $INCLUDE sites-enabled/
 ```
 
-### 4.2 Configure Clients
+### 4.2 Create Proxy Configuration
+
+Create `config/proxy.conf`:
+
+```conf
+proxy server {
+        default_fallback = no
+}
+
+home_server localhost {
+        type = auth
+        ipaddr = 127.0.0.1
+        port = 1812
+        secret = testing123
+        response_window = 20
+        max_outstanding = 65536
+        num_packet_retries = 3
+        status_check = status-server
+        check_interval = 30
+        check_timeout = 4
+        revive_interval = 120
+        status_check_timeout = 4
+        coa {
+                irt = 2
+                mrt = 16
+                mrc = 5
+                mrd = 30
+        }
+        limit {
+                max_connections = 16
+                max_requests = 0
+                lifetime = 0
+                idle_timeout = 0
+        }
+}
+
+home_server_pool my_auth_failover {
+        type = fail-over
+        home_server = localhost
+}
+
+realm DEFAULT {
+        auth_pool = my_auth_failover
+        nostrip
+}
+```
+
+### 4.3 Create Policy Configuration
+
+Create `config/policy.conf`:
+
+```conf
+policy {
+        $INCLUDE ${confdir}/policy.d/
+}
+```
+
+### 4.4 Configure Clients
 
 Create `config/clients.conf`:
 
@@ -161,7 +218,7 @@ client your_wireless_controller {
 }
 ```
 
-### 4.3 Configure EAP-TLS
+### 4.5 Configure EAP-TLS
 
 Create `config/mods-available/eap`:
 
@@ -199,7 +256,7 @@ eap {
 }
 ```
 
-### 4.4 Configure Authentication
+### 4.6 Configure Default Site
 
 Create `config/sites-available/default`:
 
@@ -257,6 +314,26 @@ server default {
 }
 ```
 
+### 4.7 Create Sites-Enabled Directory
+
+```bash
+mkdir -p config/sites-enabled
+ln -s ../sites-available/default config/sites-enabled/default
+```
+
+### 4.8 Create Mods-Enabled Directory
+
+```bash
+mkdir -p config/mods-enabled
+ln -s ../mods-available/eap config/mods-enabled/eap
+```
+
+### 4.9 Create Policy Directory
+
+```bash
+mkdir -p config/policy.d
+```
+
 ## Step 5: Prepare Certificates
 
 ### 5.1 Copy Your Root CA Certificate
@@ -270,7 +347,78 @@ cp /path/to/your/intune-root-ca.crt certs/ca.crt
 
 ### 5.2 Generate Server Certificate
 
-Create a script to generate the server certificate (`generate-certs.sh`):
+You have two options for generating the server certificate:
+
+#### Option A: Using Microsoft CA (Recommended for Enterprise)
+
+This approach uses your existing Microsoft CA infrastructure for consistency.
+
+1. **Generate Certificate Request on Windows Server with Microsoft CA:**
+
+```powershell
+# On your Windows Server with Microsoft CA installed
+certreq -new -f -q -attrib "SAN=DNS=freeradius-server.yourdomain.com&DNS=freeradius-server&IPAddress=YOUR_SERVER_IP" C:\temp\freeradius.inf C:\temp\freeradius.req
+```
+
+Create the `freeradius.inf` file:
+
+```ini
+[NewRequest]
+Subject = "CN=freeradius-server, O=YourOrganization, C=US"
+KeySpec = 1
+KeyLength = 2048
+Exportable = TRUE
+MachineKeySet = TRUE
+SMIME = FALSE
+PrivateKeyArchive = FALSE
+UserProtected = FALSE
+UseExistingKeySet = FALSE
+ProviderName = "Microsoft RSA SChannel Cryptographic Provider"
+ProviderType = 12
+RequestType = PKCS10
+KeyUsage = 0xa0
+[EnhancedKeyUsageExtension]
+OID=1.3.6.1.5.5.7.3.1
+[Extensions]
+2.5.29.17 = "{text}"
+_continue_ = "DNS=freeradius-server.yourdomain.com&"
+_continue_ = "DNS=freeradius-server&"
+_continue_ = "IPAddress=YOUR_SERVER_IP"
+```
+
+2. **Submit Request to Microsoft CA:**
+
+```powershell
+# Submit the request to your Microsoft CA
+certreq -submit -attrib "CertificateTemplate=WebServer" C:\temp\freeradius.req C:\temp\freeradius.cer
+```
+
+3. **Export Private Key and Certificate:**
+
+```powershell
+# Install the certificate
+certreq -accept C:\temp\freeradius.cer
+
+# Export the certificate with private key
+certutil -exportpfx -p "YourPassword" My "freeradius-server" C:\temp\freeradius.pfx
+```
+
+4. **Convert to PEM Format:**
+
+On your Linux system or Docker host:
+
+```bash
+# Convert PFX to PEM files
+openssl pkcs12 -in freeradius.pfx -out certs/server.key -nocerts -nodes -passin pass:YourPassword
+openssl pkcs12 -in freeradius.pfx -out certs/server.crt -clcerts -nokeys -passin pass:YourPassword
+
+# Clean up the private key file (remove the header/footer)
+sed -i '/^-----BEGIN PRIVATE KEY-----$/,$!d;/^-----END PRIVATE KEY-----$/q' certs/server.key
+```
+
+#### Option B: Local Certificate Generation
+
+Create a script to generate the server certificate locally (`generate-certs.sh`):
 
 ```bash
 #!/bin/bash
@@ -298,6 +446,40 @@ Make the script executable and run it:
 chmod +x generate-certs.sh
 ./generate-certs.sh
 ```
+
+### 5.3 Generate DH Parameters (Required for both options)
+
+```bash
+# Generate DH parameters for TLS
+openssl dhparam -out certs/dh 2048
+chmod 644 certs/dh
+```
+
+### 5.4 Verify Certificate Chain
+
+```bash
+# Verify the certificate chain
+openssl verify -CAfile certs/ca.crt certs/server.crt
+
+# Check certificate details
+openssl x509 -in certs/server.crt -text -noout
+```
+
+## Key Benefits of Using Microsoft CA
+
+1. **Centralized Management**: All certificates are managed through your existing CA infrastructure
+2. **Consistency**: Same certificate templates and policies across your organization
+3. **Automated Renewal**: Can leverage existing certificate auto-renewal processes
+4. **Audit Trail**: Certificate requests and issuance are logged in your CA
+5. **Integration**: Works seamlessly with your existing PKI infrastructure
+
+## Important Considerations
+
+1. **Certificate Template**: Use a template that supports server authentication (like "WebServer")
+2. **Subject Alternative Names (SAN)**: Include both DNS names and IP addresses for flexibility
+3. **Key Usage**: Ensure the certificate has the correct key usage extensions
+4. **Validity Period**: Match your organization's certificate lifecycle policies
+5. **Private Key Protection**: Use strong passwords when exporting the PFX file
 
 ## Step 6: Start FreeRADIUS
 
@@ -401,7 +583,7 @@ docker exec -it freeradius-server bash
 docker exec -it freeradius-server freeradius -X
 
 # Check certificate validity
-docker exec -it freeradius-server openssl x509 -in /etc/raddb/certs/server.crt -text -noout
+docker exec -it freeradius-server openssl x509 -in /etc/freeradius/3.0/certs/server.crt -text -noout
 ```
 
 This setup provides a robust FreeRADIUS server that validates certificates distributed by Intune without requiring AD attributes, making it perfect for your Android kiosk mode deployment.
